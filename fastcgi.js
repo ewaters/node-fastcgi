@@ -32,6 +32,7 @@ var LOG = DEFS.log
 
 module.exports = { 'httpd': httpd
                  , 'find_header_break': find_header_break
+                 , 'get': get
                  }
 
 var RECORD_NAMES = learn_record_names()
@@ -49,9 +50,57 @@ function httpd(port, host, socket_path, callback) {
       values.FCGI_MPXS_CONNS = values.FCGI_MPXS_CONNS || 0
       LOG.info('FCGI values: %j', values)
 
-      var server = http.createServer(fcgi_handler(port, host, values, socket, socket_path))
+      var server = http.createServer(fcgi_handler(port, host, values, socket, socket_path, { keep_connected: true }))
       server.listen(port, host)
       return callback(null)
+    })
+  })
+}
+
+function get(param, callback) {
+  var socket_path = param.socket_path
+    , server_port = param.server_port || 1337
+    , server_host = param.server_host || '10.0.0.1'
+    , req = { method:  'GET'
+            , url:     param.url
+            , headers: param.headers || {}
+            }
+    , res = { data: null }
+
+  // Setup a response object that the handler will call with data
+
+  res.writeHead = function(status, headers) {
+    this.status  = status
+    this.headers = headers
+  }
+
+  res.write = function(data) {
+    if (this.data === null)
+      this.data = data
+    else
+      this.data = Buffer.concat([ this.data, data ])
+  }
+
+  res.end = function() {
+    var err = null
+    if (this.data.length != this.headers['content-length'])
+      err = util.format("Response data length %d doesn't match Content-Length %d", this.data.length, this.headers['content-length'])
+    callback(err, this, this.data)
+  }
+
+  connect_fcgi(socket_path, 0, function(er, socket) {
+    if(er)
+      return callback(er)
+
+    fcgi_get_values(socket, function(er, values) {
+      if(er)
+        return callback(er)
+
+      values.FCGI_MPXS_CONNS = values.FCGI_MPXS_CONNS || 0
+      LOG.info('FCGI values: %j', values)
+
+      var handler = fcgi_handler(server_port, server_host, values, socket, socket_path, { keep_connected: false })
+      handler(req, res)
     })
   })
 }
@@ -122,7 +171,7 @@ function fcgi_get_values(socket, callback) {
   }
 }
 
-function fcgi_handler(port, server_addr, features, socket, socket_path) {
+function fcgi_handler(port, server_addr, features, socket, socket_path, options) {
   var request_id = 0
     , requests_in_flight = {}
     , pending_requests = []
@@ -300,14 +349,16 @@ function fcgi_handler(port, server_addr, features, socket, socket_path) {
       })
     }
 
-    connect_fcgi(socket_path, 0, function(er, new_socket) {
-      if(er)
-        throw er // TODO
+    if (options.keep_connected) {
+      connect_fcgi(socket_path, 0, function(er, new_socket) {
+        if(er)
+          throw er // TODO
 
-      //LOG.info('Reconnected: %s', socket_path)
-      socket = new_socket
-      prep_socket()
-    })
+        //LOG.info('Reconnected: %s', socket_path)
+        socket = new_socket
+        prep_socket()
+      })
+    }
   }
 
   function on_data(data) {
@@ -406,6 +457,9 @@ function fcgi_handler(port, server_addr, features, socket, socket_path) {
         else
           headers[key] = match[2]
       })
+
+      // not all fcgi servers provide the Status header
+      request.status = request.status || 200;
 
       delete headers['accept-encoding']
       request.res.writeHead(request.status, headers)
