@@ -83,7 +83,7 @@ function get(param, callback) {
 
   res.end = function() {
     var err = null
-    if (this.data.length != this.headers['content-length'])
+    if (this.headers['content-length'] && this.data.length != this.headers['content-length'])
       err = util.format("Response data length %d doesn't match Content-Length %d", this.data.length, this.headers['content-length'])
     callback(err, this, this.data)
   }
